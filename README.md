@@ -1,8 +1,8 @@
 # Picture-swipe (Bildesveip)
 
-En liten Mac-app for å rydde i bilder. Du ser ett bilde om gangen og sveiper det til høyre for å beholde eller til venstre for å kaste. Ingenting slettes mens du sorterer: alt du kaster, samles i en egen visning, der du går gjennom det før noe faktisk forsvinner.
+En liten Mac-app for å rydde i bilder, skrevet i ren Rust. Du ser ett bilde om gangen og sveiper det til høyre for å beholde eller til venstre for å kaste. Ingenting slettes mens du sorterer: alt du kaster, samles i en egen visning, der du går gjennom det før noe faktisk forsvinner.
 
-*A small macOS app for tidying photos, one swipe at a time. Discarded photos are only marked and collected for review, and nothing is removed until you confirm. The app's interface is in Norwegian.*
+*A small macOS app for tidying photos, one swipe at a time, written in pure Rust. Discarded photos are only marked and collected for review, and nothing is removed until you confirm. The app's interface is in Norwegian.*
 
 ## Hva den gjør
 
@@ -10,7 +10,7 @@ En liten Mac-app for å rydde i bilder. Du ser ett bilde om gangen og sveiper de
 - **Egen visning for «Til sletting».** Se gjennom alt du har kastet, og ombestem deg før noe skjer.
 - **Bildemapper.** HEIC, JPEG, PNG, TIFF, WebP, AVIF og vanlige RAW-formater.
 - **Bilder-biblioteket på Mac.** Sorter direkte i biblioteket ditt, også bilder som bare ligger i iCloud.
-- **Laget for Mac.** Følger Apples retningslinjer for design, med systemfarger, lys og mørk modus og full menylinje.
+- **Laget for Mac.** Native menylinje, lys og mørk modus, og aksentfargen du har valgt i macOS.
 
 ## Slik beskytter den bildene dine
 
@@ -34,6 +34,7 @@ Sletting er det eneste som ikke skal kunne gå galt, så det er bygget i flere l
 | `⌘Z` | Angre |
 | `Mellomrom` | Stor visning |
 | `B` | Legg tilbake, i «Til sletting» og «Beholdt» |
+| `⌘A` | Marker alt |
 | `⌘1`, `⌘2`, `⌘3` | Sveip, Til sletting, Beholdt |
 | `⌘O` | Åpne mappe |
 | `⇧⌘O` | Åpne Bilder-biblioteket |
@@ -42,34 +43,33 @@ Sletting er det eneste som ikke skal kunne gå galt, så det er bygget i flere l
 
 | Del | Teknologi |
 |---|---|
-| App-rammeverk | [Tauri 2](https://tauri.app) |
-| Backend | Rust |
-| Grensesnitt | TypeScript og CSS, uten UI-rammeverk |
-| Bilder-biblioteket | Apples PhotoKit, via en liten Objective-C-bro |
-| Miniatyrer | macOS' eget `sips`-verktøy |
+| Språk | Rust |
+| Grensesnitt | [egui](https://github.com/emilk/egui) og eframe, tegnet med wgpu |
+| Bilder-biblioteket | Apples PhotoKit, via [objc2-photos](https://crates.io/crates/objc2-photos) |
+| Menylinje | [muda](https://crates.io/crates/muda) |
+| Bildekonvertering | macOS' eget `sips`-verktøy |
 
-Den ferdige appen er rundt 5 MB. Koden er skrevet med hjelp av AI-verktøyene Claude Code og Codex.
+Koden er skrevet med hjelp av AI-verktøyene Claude Code og Codex.
 
 ## Bygg den selv
 
-Appen er foreløpig bare for macOS 11 eller nyere, og det finnes ingen ferdig nedlasting. Du trenger [Rust](https://rustup.rs), [Node.js](https://nodejs.org) og Xcodes kommandolinjeverktøy.
+Appen er foreløpig bare for macOS 11 eller nyere, og det finnes ingen ferdig nedlasting. Du trenger [Rust](https://rustup.rs) og Xcodes kommandolinjeverktøy.
 
 ```bash
-npm install
-npm run tauri dev                    # kjør i utviklingsmodus
-npm run tauri build -- --bundles app # bygg Bildesveip.app
+./scripts/bundle.sh                   # bygger target/release/Bildesveip.app
+open target/release/Bildesveip.app
 ```
 
 Appen signeres bare lokalt, så macOS kan spørre om tilgang til Bilder på nytt etter hver bygging.
 
-Tester og kodekontroll kjøres i `src-tauri`:
+Tester og kodekontroll:
 
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-`CONTRACT.md` beskriver grensesnittet mellom Rust og TypeScript, sikkerhetsreglene og de kjente begrensningene. Valgene dine lagres per mappe i `~/Library/Application Support/io.github.sti90.bildesveip/`. Ikonet tegnes av `design/lag-ikon.swift`.
+Valgene dine lagres per mappe i `~/Library/Application Support/io.github.sti90.bildesveip/`.
 
 ## Begrensninger
 

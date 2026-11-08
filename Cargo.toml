@@ -1,0 +1,30 @@
+[package]
+name = "bildesveip"
+version = "0.1.0"
+edition = "2024"
+description = "A macOS app for sorting photos one swipe at a time"
+authors = ["Sti90"]
+license = "MIT"
+repository = "https://github.com/Sti90/Picture-swipe"
+
+[dependencies]
+block2 = "0.6.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "accesskit"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+muda = "0.21.2"
+objc2 = { version = "0.6.5", features = ["exception"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSColor", "NSColorSpace", "NSWorkspace", "NSGraphicsContext", "NSGraphics"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGImage"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSData", "NSDate", "NSDictionary", "NSError", "NSString", "NSSortDescriptor", "NSValue", "NSObjCRuntime", "NSGeometry", "NSEnumerator", "NSObject", "block2"] }
+objc2-photos = "0.3.2"
+rfd = "0.18.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10"
+tempfile = "3.27.0"
+trash = "5"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
+kamadak-exif = "0.6"
