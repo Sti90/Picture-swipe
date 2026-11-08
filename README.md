@@ -51,13 +51,22 @@ Sletting er det eneste som ikke skal kunne gå galt, så det er bygget i flere l
 
 Koden er skrevet med hjelp av AI-verktøyene Claude Code og Codex.
 
+## Last ned
+
+Hent DMG-filen fra [siste release](https://github.com/Sti90/Picture-swipe/releases/latest). Den krever macOS 11 eller nyere og en Mac med Apple-brikke (M1 eller nyere).
+
+1. Åpne DMG-filen og dra Bildesveip over til Programmer.
+2. Prøv å åpne appen. macOS stopper den første gangen, fordi appen ikke er notarisert hos Apple.
+3. Gå til Systeminnstillinger → Personvern og sikkerhet, bla ned og trykk **Åpne likevel**.
+
 ## Bygg den selv
 
-Appen er foreløpig bare for macOS 11 eller nyere, og det finnes ingen ferdig nedlasting. Du trenger [Rust](https://rustup.rs) og Xcodes kommandolinjeverktøy.
+Appen er foreløpig bare for macOS 11 eller nyere. Du trenger [Rust](https://rustup.rs) og Xcodes kommandolinjeverktøy.
 
 ```bash
 ./scripts/bundle.sh                   # bygger target/release/Bildesveip.app
 open target/release/Bildesveip.app
+./scripts/dmg.sh                      # pakker appen i en DMG-fil
 ```
 
 Appen signeres bare lokalt, så macOS kan spørre om tilgang til Bilder på nytt etter hver bygging.
