@@ -642,6 +642,27 @@ impl App {
             }
             x -= width + 12.0;
         }
+        if self.store.view != View::Sweep {
+            let label = "Legg tilbake";
+            let width = widgets::button_width(ui, label);
+            let rect =
+                Rect::from_min_size(pos2(x - width, bar.center().y - 14.0), vec2(width, 28.0));
+            let selected = !self.store.selection.is_empty();
+            if push_button(
+                ui,
+                rect,
+                "restore",
+                label,
+                Style::Plain,
+                enabled && selected,
+                false,
+                palette,
+            ) {
+                let ctx = ui.ctx().clone();
+                self.run(&ctx, Action::Restore, ui.input(|i| i.time));
+            }
+            x -= width + 12.0;
+        }
         let tool =
             |x: f32| Rect::from_center_size(pos2(x - 14.0, bar.center().y), vec2(28.0, 28.0));
         let now = ui.input(|i| i.time);
@@ -1135,7 +1156,7 @@ mod tests {
     use super::*;
     use crate::{scan::FolderState, store::tests::folder};
     use eframe::egui::{ColorImage, Theme};
-    use egui_kittest::Harness;
+    use egui_kittest::{Harness, kittest::Queryable};
     use std::cell::RefCell;
 
     fn scene(width: usize, height: usize, top: [u8; 3], bottom: [u8; 3]) -> ColorImage {
@@ -1225,6 +1246,36 @@ mod tests {
         app.sweep.acted = false;
         app.last_action = None;
         app.run(ctx, action, 100.0);
+    }
+
+    #[test]
+    fn the_restore_button_takes_selected_photos_out_of_review() {
+        let holder: RefCell<Option<App>> = RefCell::new(None);
+        let mut harness = Harness::builder()
+            .with_size(vec2(1180.0, 780.0))
+            .build_ui(|ui| {
+                let mut slot = holder.borrow_mut();
+                let app = slot.get_or_insert_with(|| {
+                    let mut app = sample(ui.ctx(), 3, &[Decision::Discard; 3]);
+                    app.store.set_view(View::Review);
+                    app
+                });
+                app.tick(ui.ctx());
+                app.show(ui);
+            });
+        harness.run();
+        // Nothing selected: the button does nothing.
+        harness.get_by_label("Legg tilbake").click();
+        harness.run();
+        assert_eq!(holder.borrow_mut().as_mut().unwrap().store.counts().2, 3);
+        holder.borrow_mut().as_mut().unwrap().store.selection = [1].into();
+        harness.run();
+        harness.get_by_label("Legg tilbake").click();
+        harness.run();
+        let mut slot = holder.borrow_mut();
+        let store = &mut slot.as_mut().unwrap().store;
+        assert_eq!(store.list(View::Review), &[0, 2]);
+        assert_eq!(store.photos()[1].decision, Decision::Undecided);
     }
 
     #[test]
