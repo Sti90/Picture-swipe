@@ -458,7 +458,8 @@ impl App {
             review_has_photos: has_folder && view == View::Review && discard > 0,
             can_undo: self.store.can_undo(),
             can_reveal: self.can_reveal(),
-            modal: self.store.sheet.is_some(),
+            // Opening a folder while loading would be dropped, so loading counts as modal.
+            modal: self.store.locked(),
             library: self.store.is_library(),
         };
         if let Some(menu) = &mut self.menu {
@@ -989,7 +990,10 @@ impl App {
         let (title, body, confirm, failures) = self.sheet_copy(&sheet);
         let title_galley = painter.layout(title, widgets::font(15.0), palette.label, wrap);
         let body_galley = painter.layout(body, widgets::font(13.0), palette.secondary, wrap);
-        let list_height = (failures.len().min(6) as f32) * 38.0;
+        const SHOWN: usize = 6;
+        let hidden = failures.len().saturating_sub(SHOWN);
+        let more_height = if hidden > 0 { 22.0 } else { 0.0 };
+        let list_height = (failures.len().min(SHOWN) as f32) * 38.0 + more_height;
         let height = 24.0
             + title_galley.size().y
             + 8.0
@@ -1020,7 +1024,7 @@ impl App {
         let body_size = body_galley.size().y;
         painter.galley(pos2(x, y), body_galley, palette.secondary);
         y += body_size + 16.0;
-        for (name, why) in failures.iter().take(6) {
+        for (name, why) in failures.iter().take(SHOWN) {
             let fitted = widgets::fit_text(ui, name, 12.0, wrap);
             widgets::text(
                 &painter,
@@ -1040,6 +1044,16 @@ impl App {
                 palette.secondary,
             );
             y += 38.0;
+        }
+        if hidden > 0 {
+            widgets::text(
+                &painter,
+                pos2(x, y),
+                Align2::LEFT_TOP,
+                format!("og {} til", images(hidden)),
+                12.0,
+                palette.secondary,
+            );
         }
         let buttons_y = rect.bottom() - 20.0 - 28.0;
         let focus = self.sheet_focus;
@@ -1129,7 +1143,7 @@ impl App {
                 };
                 (
                     format!("{} kunne ikke flyttes", images(failed.len())),
-                    format!("De ligger fortsatt i Til sletting.{also}"),
+                    format!("Ingenting ble gjort med dem.{also}"),
                     None,
                     failed.clone(),
                 )
@@ -1414,7 +1428,7 @@ mod tests {
         let dir = PathBuf::from(std::env::var("SNAPSHOT_DIR").expect("SNAPSHOT_DIR"));
         std::fs::create_dir_all(&dir).unwrap();
         type Setup = fn(&Context) -> App;
-        let states: [(&str, Theme, Setup); 8] = [
+        let states: [(&str, Theme, Setup); 9] = [
             ("tom", Theme::Dark, |ctx| {
                 let mut app = sample(ctx, 1, &[]);
                 app.store.folder = None;
@@ -1451,6 +1465,18 @@ mod tests {
                 let mut app = sample_library(ctx);
                 app.store.set_view(View::Review);
                 app.store.ask_trash();
+                app
+            }),
+            ("feilet-flytting", Theme::Light, |ctx| {
+                let mut app = sample(ctx, 8, &[Decision::Discard; 8]);
+                app.store.set_view(View::Review);
+                app.store.sheet = Some(Sheet::Failures {
+                    moved: 0,
+                    failed: names(8)
+                        .into_iter()
+                        .map(|n| (n, "Filen er endret siden den ble merket.".to_owned()))
+                        .collect(),
+                });
                 app
             }),
             ("feilet-bibliotek", Theme::Dark, |ctx| {

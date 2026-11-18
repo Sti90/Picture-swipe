@@ -27,6 +27,7 @@ impl View {
     }
 }
 
+#[derive(Clone)]
 struct UndoEntry {
     id: u64,
     changes: Vec<(usize, Decision)>,
@@ -37,6 +38,8 @@ struct PendingWrite {
     photos: Vec<usize>,
     decision: Decision,
     undo: u64,
+    /// For a write made by undo: the entry it used up, given back if the write fails.
+    reverts: Option<UndoEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -360,6 +363,7 @@ impl Store {
                 photos,
                 decision,
                 undo: id,
+                reverts: None,
             },
         );
         self.outbox.push(Command::Write {
@@ -394,6 +398,20 @@ impl Store {
         }
         if let Err(error) = result {
             self.undo.retain(|entry| entry.id != write.undo);
+            // A choice that was never saved has nothing to undo, so an undo of it still in
+            // flight must not give its entry back. Replies arrive in order, so this runs first.
+            for pending in self.writes.values_mut() {
+                if pending.reverts.as_ref().is_some_and(|e| e.id == write.undo) {
+                    pending.reverts = None;
+                }
+            }
+            // A failed undo changed nothing on disk, so it can be tried again.
+            if let Some(entry) = write.reverts
+                && !self.undo.iter().any(|e| e.id == entry.id)
+            {
+                let at = self.undo.partition_point(|e| e.id < entry.id);
+                self.undo.insert(at, entry);
+            }
             self.prune_selection();
             self.status = None;
             self.error = Some(format!("Kunne ikke lagre valget. {error}"));
@@ -433,6 +451,7 @@ impl Store {
         let Some(entry) = self.undo.pop() else {
             return Vec::new();
         };
+        let used = entry.clone();
         let mut groups: Vec<(Decision, Vec<usize>)> = Vec::new();
         for (photo, previous) in entry.changes {
             match groups
@@ -454,6 +473,9 @@ impl Store {
         for (decision, photos) in groups {
             restored.extend(photos.iter().copied());
             self.commit(photos, decision, false, true);
+            if let Some(write) = self.writes.get_mut(&(self.next_id - 1)) {
+                write.reverts = Some(used.clone());
+            }
         }
         self.prune_selection();
         restored
@@ -688,6 +710,39 @@ pub mod tests {
         assert_eq!(store.current(), Some(0));
         assert!(store.error.as_deref().unwrap().contains("full disk"));
         assert!(!store.can_undo());
+    }
+
+    #[test]
+    fn a_failed_undo_can_be_tried_again() {
+        let mut store = opened(&["a", "b"]);
+        store.decide(false);
+        store.decide(true);
+        let tokens = write_tokens(&mut store);
+        store.on_written(tokens[0], Ok(()));
+        store.on_written(tokens[1], Ok(()));
+        assert_eq!(store.undo(), vec![1]);
+        let undo = write_tokens(&mut store)[0];
+        store.on_written(undo, Err("read-only".into()));
+        assert_eq!(store.photos()[1].decision, Decision::Keep);
+        // The same undo again, not the older one for a.
+        assert_eq!(store.undo(), vec![1]);
+        assert_eq!(store.photos()[1].decision, Decision::Undecided);
+    }
+
+    #[test]
+    fn an_undo_of_a_choice_that_failed_is_not_given_back() {
+        let mut store = opened(&["a", "b"]);
+        store.decide(true);
+        let older = write_tokens(&mut store)[0];
+        store.on_written(older, Ok(()));
+        store.decide(false);
+        store.undo();
+        let tokens = write_tokens(&mut store);
+        store.on_written(tokens[0], Err("gone".into()));
+        store.on_written(tokens[1], Err("gone".into()));
+        assert_eq!(store.photos()[1].decision, Decision::Undecided);
+        // Undo reaches the older, saved choice instead of the one that never happened.
+        assert_eq!(store.undo(), vec![0]);
     }
 
     #[test]

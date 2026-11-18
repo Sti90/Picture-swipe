@@ -86,6 +86,7 @@ pub struct Enabled {
     pub review_has_photos: bool,
     pub can_undo: bool,
     pub can_reveal: bool,
+    /// A confirmation is showing or a source is loading.
     pub modal: bool,
     pub library: bool,
 }
