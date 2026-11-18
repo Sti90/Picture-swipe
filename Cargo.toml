@@ -1,6 +1,6 @@
 [package]
 name = "bildesveip"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A macOS app for sorting photos one swipe at a time"
 authors = ["Sti90"]

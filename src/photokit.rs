@@ -35,6 +35,9 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(90);
 const CANCELLED: isize = 3072;
 const ACCESS_RESTRICTED: isize = 3310;
 const ACCESS_DENIED: isize = 3311;
+/// Not a documented PHPhotosError. Seen when the access level was changed while the app was
+/// running; relaunching clears it.
+const STALE_ACCESS: isize = 46104;
 const JPEG_QUALITY: f64 = 0.8;
 
 fn message(code: &str) -> String {
@@ -334,6 +337,9 @@ fn delete(listed: &[(String, u64)]) -> DeleteOutcome {
         Err(error) => match error.code() {
             CANCELLED => DeleteOutcome::Cancelled,
             ACCESS_DENIED | ACCESS_RESTRICTED => DeleteOutcome::Failed(message("denied")),
+            STALE_ACCESS => DeleteOutcome::Failed(
+                "Tilgangen til Bilder er endret. Start Bildesveip på nytt.".into(),
+            ),
             code => {
                 DeleteOutcome::Failed(format!("Bilder kunne ikke slette bildene (kode {code})."))
             }
