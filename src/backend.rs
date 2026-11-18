@@ -63,7 +63,7 @@ impl Store {
         let location = decisions::location(&self.data, &folder);
         let (mut saved, state_reset) = decisions::load_checked(&location)?;
         result.state_reset = state_reset;
-        if scan::apply_saved(&mut result.photos, &mut saved) {
+        if scan::apply_saved(&mut result.photos, &mut saved, true) {
             decisions::save(&location, &saved)?;
         }
         decisions::atomic_write(
@@ -103,14 +103,26 @@ impl Store {
         decisions::save(&path, &values)
     }
 
-    pub fn trash(&self, folder: &str, names: &[String]) -> Result<TrashResult, String> {
+    pub fn trash(
+        &self,
+        folder: &str,
+        names: &[String],
+        versions: &[Fingerprint],
+    ) -> Result<TrashResult, String> {
         if library::is_library(folder) {
-            return self.library.trash(names);
+            return self.library.trash(names, versions);
         }
-        let folder = scan::folder(folder)?;
+        let opened = folder;
+        let folder = scan::folder(opened)?;
+        // `opened` is the resolved path from when the folder was opened. If it now leads
+        // elsewhere, the confirmation was about another folder.
+        if folder.as_os_str() != opened {
+            return Err("Mappen er flyttet eller endret. Åpne den på nytt.".into());
+        }
         trash::perform(
             &folder,
             names,
+            versions,
             &decisions::location(&self.data, &folder),
             trash::system_delete,
         )
@@ -132,6 +144,7 @@ pub enum Command {
     Trash {
         folder: String,
         names: Vec<String>,
+        versions: Vec<Fingerprint>,
     },
 }
 
@@ -148,6 +161,33 @@ pub enum Reply {
     Trashed {
         result: Result<TrashResult, String>,
     },
+}
+
+impl Command {
+    /// The reply for a command that crashed, so the UI rolls back instead of waiting forever.
+    fn failed(&self) -> Reply {
+        let error = "En intern feil avbrøt handlingen. Åpne mappen på nytt.".to_owned();
+        match self {
+            Command::Open { request, .. } => Reply::Opened {
+                request: *request,
+                result: Err(error),
+                access: None,
+            },
+            Command::Write { token, .. } => Reply::Written {
+                token: *token,
+                result: Err(error),
+            },
+            Command::Trash { .. } => Reply::Trashed { result: Err(error) },
+        }
+    }
+}
+
+/// A panic in one command must not take the worker down: every later choice would then
+/// look saved without being written.
+fn handle_guarded(store: &Store, command: Command) -> Reply {
+    let failed = command.failed();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(store, command)))
+        .unwrap_or(failed)
 }
 
 fn handle(store: &Store, command: Command) -> Reply {
@@ -172,8 +212,12 @@ fn handle(store: &Store, command: Command) -> Reply {
             token,
             result: store.set_decisions(&folder, names, versions, decision),
         },
-        Command::Trash { folder, names } => Reply::Trashed {
-            result: store.trash(&folder, &names),
+        Command::Trash {
+            folder,
+            names,
+            versions,
+        } => Reply::Trashed {
+            result: store.trash(&folder, &names, &versions),
         },
     }
 }
@@ -194,7 +238,7 @@ impl Backend {
         let worker_store = store.clone();
         let worker = std::thread::spawn(move || {
             for command in commands {
-                if reply.send(handle(&worker_store, command)).is_err() {
+                if reply.send(handle_guarded(&worker_store, command)).is_err() {
                     return;
                 }
                 ctx.request_repaint();
@@ -255,7 +299,7 @@ mod tests {
         fn list(&self) -> Result<Vec<Asset>, String> {
             Ok(Vec::new())
         }
-        fn delete(&self, _: &[String]) -> DeleteOutcome {
+        fn delete(&self, _: &[(String, u64)]) -> DeleteOutcome {
             panic!("must not delete")
         }
         fn render(&self, _: &str, _: u32, _: bool, _: &Path) -> Result<(), String> {
@@ -265,6 +309,76 @@ mod tests {
 
     fn store(root: &Path) -> Store {
         Store::new(root.join("data"), root.join("cache"), Arc::new(NoPhotos))
+    }
+
+    struct Crashing;
+    impl Library for Crashing {
+        fn status(&self) -> Status {
+            Status::Authorized
+        }
+        fn request_access(&self) -> Status {
+            Status::Authorized
+        }
+        fn list(&self) -> Result<Vec<Asset>, String> {
+            panic!("simulated crash")
+        }
+        fn delete(&self, _: &[(String, u64)]) -> DeleteOutcome {
+            panic!("must not delete")
+        }
+        fn render(&self, _: &str, _: u32, _: bool, _: &Path) -> Result<(), String> {
+            Err("none".into())
+        }
+    }
+
+    #[test]
+    fn a_crashing_command_fails_alone_and_the_next_one_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("photos");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.jpg"), b"x").unwrap();
+        let store = Store::new(
+            root.path().join("data"),
+            root.path().join("cache"),
+            Arc::new(Crashing),
+        );
+        let open = |path: &str| Command::Open {
+            request: 7,
+            path: path.into(),
+        };
+        let Reply::Opened {
+            request, result, ..
+        } = handle_guarded(&store, open(library::LIBRARY_PATH))
+        else {
+            panic!("wrong reply")
+        };
+        assert_eq!(request, 7);
+        assert!(result.is_err());
+        let Reply::Opened { result, .. } = handle_guarded(&store, open(folder.to_str().unwrap()))
+        else {
+            panic!("wrong reply")
+        };
+        assert_eq!(result.unwrap().photos.len(), 1);
+    }
+
+    #[test]
+    fn a_folder_path_that_now_leads_elsewhere_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let (a, b) = (root.path().join("a"), root.path().join("b"));
+        for dir in [&a, &b] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("x.jpg"), b"x").unwrap();
+        }
+        let store = store(root.path());
+        let opened = store.open(a.to_str().unwrap()).unwrap();
+        let x = &opened.photos[0];
+        std::fs::rename(&a, root.path().join("old")).unwrap();
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        let result = store.trash(
+            &opened.folder,
+            std::slice::from_ref(&x.name),
+            &[x.fingerprint],
+        );
+        assert!(result.unwrap_err().contains("Åpne den på nytt"));
     }
 
     #[test]

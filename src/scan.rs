@@ -94,13 +94,16 @@ fn modified_ms(meta: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 /// Copies saved decisions onto the photos. A decision only survives if it was made
-/// about the file now under that name: entries for missing files are consumed, so a
-/// photo later restored from the Trash starts over. A discard saved before fingerprints
-/// existed can't be tied to a file, so it must be made again. Returns true if `saved` changed.
-pub fn apply_saved(photos: &mut [Photo], saved: &mut Decisions) -> bool {
-    let present: HashSet<&str> = photos.iter().map(|p| p.name.as_str()).collect();
+/// about the file now under that name. With `forget_missing`, entries for missing files
+/// are consumed, so a photo later restored from the Trash starts over; pass false when
+/// the listing may be partial. A discard saved before fingerprints existed can't be tied
+/// to a file, so it must be made again. Returns true if `saved` changed.
+pub fn apply_saved(photos: &mut [Photo], saved: &mut Decisions, forget_missing: bool) -> bool {
     let before = saved.len();
-    saved.retain(|name, _| present.contains(name.as_str()));
+    if forget_missing {
+        let present: HashSet<&str> = photos.iter().map(|p| p.name.as_str()).collect();
+        saved.retain(|name, _| present.contains(name.as_str()));
+    }
     let mut changed = saved.len() != before;
     for photo in photos {
         let Some(entry) = saved.get_mut(&photo.name) else {
@@ -222,7 +225,7 @@ mod tests {
         fs::remove_file(d.path().join("swapped.jpg")).unwrap();
         fs::write(d.path().join("swapped.jpg"), b"a different image").unwrap();
         let mut photos = scan(d.path()).unwrap().photos;
-        assert!(apply_saved(&mut photos, &mut saved));
+        assert!(apply_saved(&mut photos, &mut saved, true));
         let decision = |n: &str| photos.iter().find(|p| p.name == n).unwrap().decision;
         assert_eq!(decision("same.jpg"), Decision::Discard);
         assert_eq!(decision("swapped.jpg"), Decision::Undecided);
@@ -245,7 +248,7 @@ mod tests {
             ("gone.jpg".to_string(), old(Decision::Discard)),
         ]);
         let mut photos = scan(d.path()).unwrap().photos;
-        assert!(apply_saved(&mut photos, &mut saved));
+        assert!(apply_saved(&mut photos, &mut saved, true));
         assert_eq!(saved.keys().collect::<Vec<_>>(), vec!["keep.jpg"]);
         assert!(saved["keep.jpg"].fingerprint.is_some());
         let decision = |n: &str| photos.iter().find(|p| p.name == n).unwrap().decision;

@@ -271,37 +271,49 @@ fn first(fetched: &PHFetchResult<PHAsset>) -> Option<Retained<PHAsset>> {
     unsafe { fetched.firstObject() }
 }
 
-fn delete(ids: &[String]) -> DeleteOutcome {
+fn delete(listed: &[(String, u64)]) -> DeleteOutcome {
     if !has_access() {
         // Without access a fetch comes back empty, which would look like missing photos.
         return DeleteOutcome::Failed(message("denied"));
     }
     let identifiers: Retained<NSArray<NSString>> = NSArray::from_retained_slice(
-        &ids.iter()
-            .map(|id| NSString::from_str(id))
+        &listed
+            .iter()
+            .map(|(id, _)| NSString::from_str(id))
             .collect::<Vec<_>>(),
     );
+    let versions: std::collections::HashMap<&str, u64> =
+        listed.iter().map(|(id, v)| (id.as_str(), *v)).collect();
     // SAFETY: a valid array of strings, and no options is documented as valid.
     let fetched = unsafe { PHAsset::fetchAssetsWithLocalIdentifiers_options(&identifiers, None) };
     let mut assets = Vec::new();
     let mut found = std::collections::HashSet::new();
-    // SAFETY: indexes stay below `count`.
+    let mut changed = Vec::new();
+    // SAFETY: indexes stay below `count`, and the reads are plain property reads.
     unsafe {
         for index in 0..fetched.count() {
             let asset = fetched.objectAtIndex(index);
-            if is_eligible(&asset) {
-                found.insert(asset.localIdentifier().to_string());
+            if !is_eligible(&asset) {
+                continue;
+            }
+            let id = asset.localIdentifier().to_string();
+            // Only the version the user was shown may be deleted.
+            if versions.get(id.as_str()) != Some(&millis(asset.modificationDate())) {
+                changed.push(id.clone());
+            } else {
                 assets.push(asset);
             }
+            found.insert(id);
         }
     }
-    let missing: Vec<String> = ids
+    let missing: Vec<String> = listed
         .iter()
+        .map(|(id, _)| id)
         .filter(|id| !found.contains(*id))
         .cloned()
         .collect();
     if assets.is_empty() {
-        return DeleteOutcome::Deleted { missing };
+        return DeleteOutcome::Deleted { missing, changed };
     }
     let assets = NSArray::from_retained_slice(&assets);
     let change = RcBlock::new({
@@ -318,7 +330,7 @@ fn delete(ids: &[String]) -> DeleteOutcome {
             .performChangesAndWait_error(RcBlock::as_ptr(&change).cast())
     };
     match result {
-        Ok(()) => DeleteOutcome::Deleted { missing },
+        Ok(()) => DeleteOutcome::Deleted { missing, changed },
         Err(error) => match error.code() {
             CANCELLED => DeleteOutcome::Cancelled,
             ACCESS_DENIED | ACCESS_RESTRICTED => DeleteOutcome::Failed(message("denied")),
@@ -395,8 +407,8 @@ impl Library for PhotoKit {
         .unwrap_or_else(|| Err("Kan ikke lese Bilder-biblioteket.".into()))
     }
 
-    fn delete(&self, ids: &[String]) -> DeleteOutcome {
-        guarded(|| delete(ids))
+    fn delete(&self, assets: &[(String, u64)]) -> DeleteOutcome {
+        guarded(|| delete(assets))
             .unwrap_or_else(|| DeleteOutcome::Failed("Bilder ga et ugyldig svar.".into()))
     }
 

@@ -32,6 +32,13 @@ const NO_FINGERPRINT: Fingerprint = Fingerprint {
     modified_ms: 0,
     inode: 0,
 };
+/// The version of a photo as listed, carried by the UI but never saved with a decision.
+fn shown(modified_ms: u64) -> Fingerprint {
+    Fingerprint {
+        modified_ms,
+        ..NO_FINGERPRINT
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -51,13 +58,18 @@ impl Status {
 pub struct Asset {
     pub id: String,
     pub created_ms: u64,
-    /// Only for telling when a cached image is stale. Photos changes it on its own too,
-    /// so it must never be used as the photo's identity.
+    /// For telling when a cached image is stale, and that a photo hasn't changed since
+    /// it was listed. Photos changes it on its own too, so it must never be used as the
+    /// photo's identity or saved with a decision.
     pub modified_ms: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeleteOutcome {
-    Deleted { missing: Vec<String> },
+    /// `changed` holds photos edited since they were listed, which are left alone.
+    Deleted {
+        missing: Vec<String>,
+        changed: Vec<String>,
+    },
     Cancelled,
     Failed(String),
 }
@@ -66,7 +78,8 @@ pub trait Library: Send + Sync {
     fn status(&self) -> Status;
     fn request_access(&self) -> Status;
     fn list(&self) -> Result<Vec<Asset>, String>;
-    fn delete(&self, ids: &[String]) -> DeleteOutcome;
+    /// Each id comes with the `modified_ms` it was listed with, the version the user saw.
+    fn delete(&self, assets: &[(String, u64)]) -> DeleteOutcome;
     fn render(&self, id: &str, edge: u32, network: bool, out: &Path) -> Result<(), String>;
 }
 
@@ -255,6 +268,7 @@ impl LibrarySource {
         remove_stale_temp(&self.previews, STALE_TEMP);
         prune_previews(&self.thumbnails, MAX_THUMBNAILS);
         let mut photos = Vec::new();
+        let mut listed = Vec::new();
         for asset in assets {
             let Ok(name) = encode(&asset.id) else {
                 eprintln!("Hopper over bilde med ukjent ID-format.");
@@ -269,6 +283,7 @@ impl LibrarySource {
                 web_safe: false,
                 fingerprint: NO_FINGERPRINT,
             });
+            listed.push(asset.modified_ms);
         }
         let _guard = self
             .writes
@@ -276,9 +291,15 @@ impl LibrarySource {
             .map_err(|_| "Lagringen er utilgjengelig.")?;
         let location = self.saved();
         let (mut saved, state_reset) = decisions::load_checked(&location)?;
-        // An empty listing proves nothing, and must not consume every saved decision.
-        if !photos.is_empty() && scan::apply_saved(&mut photos, &mut saved) {
+        // Limited access and hidden photos make the listing partial, so a photo missing
+        // from it may still exist. Its decision must not be consumed.
+        if scan::apply_saved(&mut photos, &mut saved, false) {
             decisions::save(&location, &saved)?;
+        }
+        // Decisions are saved without a version, but the UI carries the version it shows,
+        // so a deletion can be refused if the photo has changed since.
+        for (photo, modified_ms) in photos.iter_mut().zip(listed) {
+            photo.fingerprint = shown(modified_ms);
         }
         decisions::atomic_write(
             &self.data.join("last-folder.json"),
@@ -300,7 +321,7 @@ impl LibrarySource {
         decision: Decision,
     ) -> Result<(), String> {
         self.ensure_opened()?;
-        if names.len() != versions.len() || versions.iter().any(|v| *v != NO_FINGERPRINT) {
+        if names.len() != versions.len() || versions.iter().any(|v| v.len != 0 || v.inode != 0) {
             return Err("Ugyldig forespørsel.".into());
         }
         for name in &names {
@@ -328,11 +349,19 @@ impl LibrarySource {
         }
         decisions::save(&location, &values)
     }
-    pub fn trash(&self, names: &[String]) -> Result<TrashResult, String> {
+    pub fn trash(&self, names: &[String], versions: &[Fingerprint]) -> Result<TrashResult, String> {
         self.ensure_opened()?;
+        if names.len() != versions.len() {
+            return Err("Ugyldig forespørsel.".into());
+        }
         for name in names {
             decode(name)?;
         }
+        let shown: HashMap<&String, u64> = names
+            .iter()
+            .zip(versions)
+            .map(|(name, v)| (name, v.modified_ms))
+            .collect();
         let _guard = self
             .writes
             .lock()
@@ -359,7 +388,12 @@ impl LibrarySource {
             .iter()
             .map(|n| decode(n))
             .collect::<Result<Vec<_>, _>>()?;
-        match self.library.delete(&ids) {
+        let assets: Vec<(String, u64)> = allowed
+            .iter()
+            .zip(&ids)
+            .map(|(name, id)| (id.clone(), shown[name]))
+            .collect();
+        match self.library.delete(&assets) {
             DeleteOutcome::Cancelled => result.failed.clear(),
             DeleteOutcome::Failed(error) => {
                 result
@@ -369,13 +403,19 @@ impl LibrarySource {
                         error: error.clone(),
                     }));
             }
-            DeleteOutcome::Deleted { missing } => {
+            DeleteOutcome::Deleted { missing, changed } => {
                 let missing: HashSet<String> = missing.into_iter().collect();
+                let changed: HashSet<String> = changed.into_iter().collect();
                 for (name, id) in allowed.into_iter().zip(&ids) {
                     if missing.contains(id) {
                         result.failed.push(Failure {
                             name,
                             error: "Bildet finnes ikke lenger i Bilder.".into(),
+                        });
+                    } else if changed.contains(id) {
+                        result.failed.push(Failure {
+                            name,
+                            error: "Bildet er endret i Bilder. Åpne biblioteket på nytt.".into(),
                         });
                     } else {
                         saved.remove(&name);
@@ -490,7 +530,7 @@ mod tests {
         requests: AtomicUsize,
         assets: Mutex<Vec<Asset>>,
         outcome: Mutex<DeleteOutcome>,
-        deleted: Mutex<Vec<Vec<String>>>,
+        deleted: Mutex<Vec<Vec<(String, u64)>>>,
         renders: AtomicUsize,
         on_delete: Mutex<Option<Hook>>,
     }
@@ -512,7 +552,10 @@ mod tests {
                         modified_ms: 2,
                     },
                 ]),
-                outcome: Mutex::new(DeleteOutcome::Deleted { missing: vec![] }),
+                outcome: Mutex::new(DeleteOutcome::Deleted {
+                    missing: vec![],
+                    changed: vec![],
+                }),
                 deleted: Mutex::new(vec![]),
                 renders: AtomicUsize::new(0),
                 on_delete: Mutex::new(None),
@@ -531,8 +574,8 @@ mod tests {
         fn list(&self) -> Result<Vec<Asset>, String> {
             Ok(self.assets.lock().unwrap().clone())
         }
-        fn delete(&self, ids: &[String]) -> DeleteOutcome {
-            self.deleted.lock().unwrap().push(ids.to_vec());
+        fn delete(&self, assets: &[(String, u64)]) -> DeleteOutcome {
+            self.deleted.lock().unwrap().push(assets.to_vec());
             if let Some(hook) = self.on_delete.lock().unwrap().take() {
                 hook();
             }
@@ -605,7 +648,7 @@ mod tests {
         assert_eq!(state.folder, LIBRARY_PATH);
         assert_eq!(state.source, "library");
         assert_eq!(state.photos[0].path, format!("{ASSET_PREFIX}{}", name(A)));
-        assert_eq!(state.photos[0].fingerprint, NO_FINGERPRINT);
+        assert_eq!(state.photos[0].fingerprint, shown(1));
 
         for status in [Status::Denied, Status::Restricted] {
             let (_d, fake, source) = setup(status);
@@ -643,7 +686,7 @@ mod tests {
                 .set_decisions(names.clone(), vec![NO_FINGERPRINT], Decision::Discard)
                 .is_err()
         );
-        assert!(source.trash(&names).is_err());
+        assert!(source.trash(&names, &[shown(1)]).is_err());
         assert!(
             source
                 .image(&format!("{ASSET_PREFIX}{}", name(A)), true)
@@ -683,11 +726,13 @@ mod tests {
     fn refuses_names_not_marked_discard() {
         let (_d, fake, source) = opened();
         mark(&source, &[A], Decision::Keep);
-        let result = source.trash(&[name(A), name(B)]).unwrap();
+        let result = source
+            .trash(&[name(A), name(B)], &[shown(1), shown(2)])
+            .unwrap();
         assert!(result.trashed.is_empty());
         assert_eq!(result.failed.len(), 2);
         assert!(fake.deleted.lock().unwrap().is_empty());
-        assert!(source.trash(&["../x".into()]).is_err());
+        assert!(source.trash(&["../x".into()], &[shown(1)]).is_err());
     }
 
     #[test]
@@ -695,11 +740,20 @@ mod tests {
         let (_d, fake, source) = opened();
         mark(&source, &[A], Decision::Discard);
         mark(&source, &[B], Decision::Keep);
-        let result = source.trash(&[name(A), name(A), name(B)]).unwrap();
+        let result = source
+            .trash(
+                &[name(A), name(A), name(B)],
+                &[shown(1), shown(1), shown(2)],
+            )
+            .unwrap();
         assert_eq!(result.trashed, vec![name(A)]);
         assert_eq!(result.failed.len(), 1);
         assert_eq!(result.bytes_freed, 0);
-        assert_eq!(*fake.deleted.lock().unwrap(), vec![vec![A.to_string()]]);
+        // With the version it was listed with, so PhotoKit can refuse an edited photo.
+        assert_eq!(
+            *fake.deleted.lock().unwrap(),
+            vec![vec![(A.to_string(), 1)]]
+        );
         let left = saved(&source);
         assert!(!left.contains_key(&name(A)) && left.contains_key(&name(B)));
     }
@@ -709,7 +763,9 @@ mod tests {
         let (_d, fake, source) = opened();
         mark(&source, &[A], Decision::Discard);
         *fake.outcome.lock().unwrap() = DeleteOutcome::Cancelled;
-        let result = source.trash(&[name(A), name(B)]).unwrap();
+        let result = source
+            .trash(&[name(A), name(B)], &[shown(1), shown(2)])
+            .unwrap();
         assert!(result.trashed.is_empty() && result.failed.is_empty());
         assert!(result.state_error.is_none());
         assert!(saved(&source).contains_key(&name(A)));
@@ -720,7 +776,9 @@ mod tests {
         let (_d, fake, source) = opened();
         mark(&source, &[A, B], Decision::Discard);
         *fake.outcome.lock().unwrap() = DeleteOutcome::Failed("Nei.".into());
-        let result = source.trash(&[name(A), name(B)]).unwrap();
+        let result = source
+            .trash(&[name(A), name(B)], &[shown(1), shown(2)])
+            .unwrap();
         assert!(result.trashed.is_empty());
         assert_eq!(result.failed.len(), 2);
         assert!(result.failed.iter().all(|f| f.error == "Nei."));
@@ -733,11 +791,47 @@ mod tests {
         mark(&source, &[A, B], Decision::Discard);
         *fake.outcome.lock().unwrap() = DeleteOutcome::Deleted {
             missing: vec![B.into()],
+            changed: vec![],
         };
-        let result = source.trash(&[name(A), name(B)]).unwrap();
+        let result = source
+            .trash(&[name(A), name(B)], &[shown(1), shown(2)])
+            .unwrap();
         assert_eq!(result.trashed, vec![name(A)]);
         assert_eq!(result.failed[0].name, name(B));
         assert!(!saved(&source).contains_key(&name(A)));
+    }
+
+    #[test]
+    fn a_photo_edited_since_listing_is_kept_and_stays_marked() {
+        let (_d, fake, source) = opened();
+        mark(&source, &[A, B], Decision::Discard);
+        *fake.outcome.lock().unwrap() = DeleteOutcome::Deleted {
+            missing: vec![],
+            changed: vec![B.into()],
+        };
+        let result = source
+            .trash(&[name(A), name(B)], &[shown(1), shown(2)])
+            .unwrap();
+        assert_eq!(result.trashed, vec![name(A)]);
+        assert_eq!(result.failed[0].name, name(B));
+        assert!(result.failed[0].error.contains("endret"));
+        assert!(saved(&source).contains_key(&name(B)));
+    }
+
+    #[test]
+    fn deletion_carries_the_version_the_ui_showed_not_a_newer_listing() {
+        // A reopen fetched an edited A (version 99) but failed before the UI installed it,
+        // so the UI still shows version 1. PhotoKit must be asked about version 1.
+        let (_d, fake, source) = opened();
+        mark(&source, &[A], Decision::Discard);
+        fake.assets.lock().unwrap()[0].modified_ms = 99;
+        let _ = source.open();
+        source.trash(&[name(A)], &[shown(1)]).unwrap();
+        assert_eq!(
+            *fake.deleted.lock().unwrap(),
+            vec![vec![(A.to_string(), 1)]]
+        );
+        assert!(source.trash(&[name(A)], &[]).is_err());
     }
 
     #[test]
@@ -749,22 +843,25 @@ mod tests {
             fs::remove_file(&location).unwrap();
             fs::create_dir(&location).unwrap();
         }));
-        let result = source.trash(&[name(A)]).unwrap();
+        let result = source.trash(&[name(A)], &[shown(1)]).unwrap();
         assert_eq!(result.trashed, vec![name(A)]);
         assert!(result.state_error.is_some());
     }
 
     #[test]
-    fn decisions_survive_reopening_and_an_empty_listing() {
+    fn decisions_survive_reopening_and_a_partial_listing() {
         let (_d, fake, source) = opened();
         mark(&source, &[A], Decision::Discard);
         assert_eq!(source.open().unwrap().photos[0].decision, Decision::Discard);
         let everything = std::mem::take(&mut *fake.assets.lock().unwrap());
         source.open().unwrap();
         assert!(saved(&source).contains_key(&name(A)));
+        // Limited access or a hidden photo: A is still in Photos, just not listed.
         *fake.assets.lock().unwrap() = everything[1..].to_vec();
         source.open().unwrap();
-        assert!(!saved(&source).contains_key(&name(A)));
+        assert!(saved(&source).contains_key(&name(A)));
+        *fake.assets.lock().unwrap() = everything;
+        assert_eq!(source.open().unwrap().photos[0].decision, Decision::Discard);
     }
 
     #[test]

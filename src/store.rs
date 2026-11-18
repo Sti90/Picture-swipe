@@ -536,13 +536,22 @@ impl Store {
             return;
         }
         *busy = true;
-        // Exactly the photos the dialog described, never a recomputed list.
+        // Exactly the photos the dialog described, never a recomputed list, and the
+        // versions of them the user was shown.
         let names = photos
             .iter()
             .map(|&p| current.photos[p].name.clone())
             .collect();
+        let versions = photos
+            .iter()
+            .map(|&p| current.photos[p].fingerprint)
+            .collect();
         let folder = folder.clone();
-        self.outbox.push(Command::Trash { folder, names });
+        self.outbox.push(Command::Trash {
+            folder,
+            names,
+            versions,
+        });
     }
 
     pub fn on_trashed(&mut self, result: Result<TrashResult, String>) {
@@ -725,10 +734,15 @@ pub mod tests {
         store.confirm_trash();
         store.confirm_trash();
         assert_eq!(store.outbox.len(), 1);
-        let Command::Trash { names, .. } = &store.outbox[0] else {
+        let Command::Trash {
+            names, versions, ..
+        } = &store.outbox[0]
+        else {
             panic!()
         };
         assert_eq!(names, &["a", "b"]);
+        let shown: Vec<_> = store.photos()[..2].iter().map(|p| p.fingerprint).collect();
+        assert_eq!(versions, &shown);
     }
 
     #[test]

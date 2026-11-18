@@ -1,5 +1,5 @@
 use crate::{
-    decisions::{self, Decision},
+    decisions::{self, Decision, Fingerprint},
     scan,
 };
 use ::trash::macos::TrashContextExtMacos;
@@ -21,9 +21,13 @@ pub struct Failure {
 pub fn perform(
     folder: &Path,
     names: &[String],
+    versions: &[Fingerprint],
     saved: &Path,
     mut delete: impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<TrashResult, String> {
+    if names.len() != versions.len() {
+        return Err("Ugyldig forespørsel.".into());
+    }
     for n in names {
         scan::validate_name(n)?;
     }
@@ -35,7 +39,7 @@ pub fn perform(
         state_error: None,
     };
     let mut seen = HashSet::new();
-    for name in names {
+    for (name, shown) in names.iter().zip(versions) {
         if !seen.insert(name) {
             continue;
         }
@@ -45,7 +49,9 @@ pub fn perform(
                 .filter(|e| e.decision == Decision::Discard)
                 .ok_or("Bildet er ikke merket for sletting.")?;
             let path = scan::file(folder, name)?;
-            if entry.fingerprint != Some(scan::fingerprint(&path)?) {
+            // The file must be the one marked and the one the user confirmed, even if the
+            // folder path now leads somewhere else.
+            if entry.fingerprint != Some(*shown) || scan::fingerprint(&path)? != *shown {
                 return Err("Filen er endret siden den ble merket. Åpne mappen på nytt.".into());
             }
             let size = path
@@ -111,6 +117,7 @@ mod tests {
                 "unknown.jpg".into(),
                 "discard.jpg".into(),
             ],
+            &now(d.path(), &["keep.jpg", "unknown.jpg", "discard.jpg"]),
             &p,
             |path| {
                 called.push(path.file_name().unwrap().to_string_lossy().into_owned());
@@ -123,11 +130,43 @@ mod tests {
         assert_eq!(r.bytes_freed, 3);
         assert!(!decisions::load(&p).unwrap().contains_key("discard.jpg"));
         assert!(
-            perform(d.path(), &["../outside.jpg".into()], &p, |_| panic!(
+            perform(d.path(), &["../outside.jpg".into()], &[V0], &p, |_| panic!(
                 "must not trash"
             ))
             .is_err()
         );
+    }
+    const V0: Fingerprint = Fingerprint {
+        len: 0,
+        modified_ms: 0,
+        inode: 0,
+    };
+    /// What the UI would have shown for each file right now.
+    fn now(dir: &Path, names: &[&str]) -> Vec<Fingerprint> {
+        names
+            .iter()
+            .map(|n| scan::fingerprint(&dir.join(n)).unwrap_or(V0))
+            .collect()
+    }
+    #[test]
+    fn refuses_a_file_other_than_the_one_confirmed() {
+        // The folder path was repointed to another folder with its own marked a.jpg: that
+        // file is marked, unchanged since, but isn't the version the user confirmed.
+        let shown = tempfile::tempdir().unwrap();
+        std::fs::write(shown.path().join("a.jpg"), b"one").unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("state.json");
+        std::fs::write(d.path().join("a.jpg"), b"two!").unwrap();
+        let marked = entry(d.path(), "a.jpg", Decision::Discard);
+        decisions::save(&p, &decisions::Decisions::from([("a.jpg".into(), marked)])).unwrap();
+        let confirmed = now(shown.path(), &["a.jpg"]);
+        let r = perform(d.path(), &["a.jpg".into()], &confirmed, &p, |_| {
+            panic!("must not trash")
+        })
+        .unwrap();
+        assert!(r.trashed.is_empty());
+        assert_eq!(r.failed.len(), 1);
+        assert!(perform(d.path(), &["a.jpg".into()], &[], &p, |_| panic!()).is_err());
     }
     fn entry(dir: &Path, name: &str, decision: Decision) -> decisions::Entry {
         decisions::Entry {
@@ -142,9 +181,10 @@ mod tests {
         std::fs::write(d.path().join("a.jpg"), b"one").unwrap();
         let marked = entry(d.path(), "a.jpg", Decision::Discard);
         decisions::save(&p, &decisions::Decisions::from([("a.jpg".into(), marked)])).unwrap();
+        let confirmed = now(d.path(), &["a.jpg"]);
         std::fs::remove_file(d.path().join("a.jpg")).unwrap();
         std::fs::write(d.path().join("a.jpg"), b"another").unwrap();
-        let r = perform(d.path(), &["a.jpg".into()], &p, |_| {
+        let r = perform(d.path(), &["a.jpg".into()], &confirmed, &p, |_| {
             panic!("must not trash")
         })
         .unwrap();
@@ -158,7 +198,8 @@ mod tests {
         std::fs::write(d.path().join("a.jpg"), b"one").unwrap();
         let marked = entry(d.path(), "a.jpg", Decision::Discard);
         decisions::save(&p, &decisions::Decisions::from([("a.jpg".into(), marked)])).unwrap();
-        let r = perform(d.path(), &["a.jpg".into()], &p, |_| {
+        let confirmed = now(d.path(), &["a.jpg"]);
+        let r = perform(d.path(), &["a.jpg".into()], &confirmed, &p, |_| {
             std::fs::remove_file(&p).unwrap();
             std::fs::create_dir(&p).unwrap();
             Ok(())
